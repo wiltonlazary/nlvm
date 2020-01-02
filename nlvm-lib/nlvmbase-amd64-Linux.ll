@@ -6,6 +6,9 @@
 ; avoid depending on c headers in the stdlib, and fix some bugs
 ; in nlvm
 
+target datalayout = "e-m:e-i64:64-f80:128-n8:16:32:64-S128"
+target triple = "x86_64-unknown-linux-gnu"
+
 ; stdio.h
 @_IOFBF = linkonce_odr constant i32 0
 @_IOLBF = linkonce_odr constant i32 1
@@ -129,9 +132,14 @@ define linkonce_odr i1 @S_ISDIR(i32 %m) {
   %2 = icmp eq i32 %1, 16384
   ret i1 %2
 }
-define linkonce_odr i1 @S_ISLNK(i32 %m) {
+define linkonce_odr i1 @S_ISCHR(i32 %m) {
   %1 = and i32 %m, 61440
-  %2 = icmp eq i32 %1, 40960
+  %2 = icmp eq i32 %1, 8192
+  ret i1 %2
+}
+define linkonce_odr i1 @S_ISBLK(i32 %m) {
+  %1 = and i32 %m, 61440
+  %2 = icmp eq i32 %1, 24576
   ret i1 %2
 }
 define linkonce_odr i1 @S_ISREG(i32 %m) {
@@ -139,7 +147,21 @@ define linkonce_odr i1 @S_ISREG(i32 %m) {
   %2 = icmp eq i32 %1, 32768
   ret i1 %2
 }
-
+define linkonce_odr i1 @S_ISFIFO(i32 %m) {
+  %1 = and i32 %m, 61440
+  %2 = icmp eq i32 %1, 4096
+  ret i1 %2
+}
+define linkonce_odr i1 @S_ISLNK(i32 %m) {
+  %1 = and i32 %m, 61440
+  %2 = icmp eq i32 %1, 40960
+  ret i1 %2
+}
+define linkonce_odr i1 @S_ISSOCK(i32 %m) {
+  %1 = and i32 %m, 61440
+  %2 = icmp eq i32 %1, 49152
+  ret i1 %2
+}
 ; sys/select.h
 %fd_set = type opaque
 

@@ -2,10 +2,41 @@
 # Copyright (c) Jacek Sieka 2016
 # See the LICENSE file for license info (doh!)
 
-const LLVMLib = "libLLVM-4.0.so"
+import strutils
 
-{.passC: "-I../ext/llvm-4.0.0.src/include".}
-{.passC: "-I../ext/llvm-4.0.0.src/rel/include".}
+const
+  LLVMLib = "libLLVM-9.so"
+  LLVMRoot = "../ext/llvm-9.0.0.src/"
+  LLDRoot = "../ext/lld-9.0.0.src/"
+  LLVMVersion* = "9.0.0"
+
+{.passL: "-llldDriver" .}
+{.passL: "-llldELF" .}
+{.passL: "-llldWasm" .}
+{.passL: "-llldCore" .}
+{.passL: "-llldCommon" .}
+
+when defined(staticLLVM):
+  const
+    LLVMOut = LLVMRoot & "sta/"
+
+  {.passL: gorge(LLVMRoot & "sta/bin/llvm-config --libs all").}
+
+else:
+  const
+    LLVMOut = LLVMRoot & "sha/"
+
+  {.passL: "-lLLVM-9".}
+  {.passL: "-Wl,'-rpath=$ORIGIN/" & LLVMOut & "lib/'".}
+
+{.passC: "-I" & LLVMRoot & "include".}
+{.passC: "-I" & LLVMOut & "include".}
+
+{.passC: "-I" & LLDRoot & "include".}
+
+{.passL: "-Wl,--as-needed".}
+{.passL: gorge(LLVMOut & "bin/llvm-config --ldflags").}
+{.passL: gorge(LLVMOut & "bin/llvm-config --system-libs").}
 
 {.compile: "wrapper.cc".}
 
@@ -29,9 +60,18 @@ type
   OpaqueDiagnosticInfo{.pure, final.} = object
   OpaqueTargetMachine{.pure, final.} = object
   OpaquePassManagerBuilder{.pure, final.} = object
+  OpaqueMetaData{.pure, final.} = object
+  OpaqueDIBuilder{.pure, final.} = object
   target{.pure, final.} = object
+  OpaqueJITEventListener{.pure, final.} = object
+  OpaqueNamedMDNode{.pure, final.} = object
+  opaqueValueMetadataEntry{.pure, final.} = object
+  comdat{.pure, final.} = object
+  opaqueModuleFlagEntry{.pure, final.} = object
+  OpaqueBinary{.pure, final.} = object
 
   # Funny type names that came out of c2nim
+  int64T = int64
   uint64T = uint64
   uint8T = uint8
 
@@ -41,16 +81,8 @@ type
 include llvm/Types
 include llvm/Support
 
-# Target.h is quite a mess with lots of site-specific stuff - some of the parts
-# that c2nim can't deal with:
-proc initializeX86AsmParser*() {.importc: "LLVMInitializeX86AsmParser", dynlib: LLVMLib.}
-proc initializeX86AsmPrinter*() {.importc: "LLVMInitializeX86AsmPrinter", dynlib: LLVMLib.}
-proc initializeX86Disassembler*() {.importc: "LLVMInitializeX86Disassembler", dynlib: LLVMLib.}
-proc initializeX86Target*() {.importc: "LLVMInitializeX86Target", dynlib: LLVMLib.}
-proc initializeX86TargetInfo*() {.importc: "LLVMInitializeX86TargetInfo", dynlib: LLVMLib.}
-proc initializeX86TargetMC*() {.importc: "LLVMInitializeX86TargetMC", dynlib: LLVMLib.}
-
 include llvm/Core
+include llvm/DebugInfo
 include llvm/BitReader
 include llvm/BitWriter
 include llvm/IRReader
@@ -59,14 +91,7 @@ include llvm/Target
 include llvm/TargetMachine
 include llvm/Transforms/PassManagerBuilder
 
-# Our wrapper
-
-type
-  DIBuilder{.pure, final.} = object
-  OpaqueNimMetadata{.pure, final.} = object
-
-  NimDIBuilderRef* = ptr DIBuilder
-  NimMetadataRef* = ptr OpaqueNimMetadata
+include preprocessed
 
 # http://www.dwarfstd.org/doc/DWARF4.pdf
 const
@@ -89,69 +114,106 @@ const
   DW_ATE_lo_user* = 0x80.cuint
   DW_ATE_hi_user* = 0xff.cuint
 
-proc nimDebugMetadataVersion*(): uint32 {.importc: "LLVMNimDebugMetadataVersion".}
+template oaAddr(v: openArray): untyped =
+  if v.len > 0: v[0].unsafeAddr else: nil
+template oaLen(v: openArray): cuint = v.len.uint32
+
 proc nimAddModuleFlag*(m: ModuleRef, name: cstring, value: uint32) {.importc: "LLVMNimAddModuleFlag".}
 
-proc nimDIBuilderCreate*(m: ModuleRef): NimDIBuilderRef {.importc: "LLVMNimDIBuilderCreate".}
-proc nimDIBuilderDispose*(d: NimDIBuilderRef) {.importc: "LLVMNimDIBuilderDispose".}
-proc nimDIBuilderFinalize*(d: NimDIBuilderRef) {.importc: "LLVMNimDIBuilderFinalize".}
-proc nimDIBuilderCreateCompileUnit*(
-  d: NimDIBuilderRef, lang: cuint,
-  fileRef: NimMetadataRef, producer: cstring, isOptimized: bool,
-  flags: cstring, runtimeVer: cuint, splitName: cstring): NimMetadataRef {.importc: "LLVMNimDIBuilderCreateCompileUnit".}
-proc nimDIBuilderCreateSubroutineType*(
-  d: NimDIBuilderRef, parameterTypes: NimMetadataRef): NimMetadataRef {.importc: "LLVMNimDIBuilderCreateSubroutineType".}
-proc nimDIBuilderCreateFile*(
-  d: NimDIBuilderRef, filename: cstring,
-  directory: cstring): NimMetadataRef {.importc: "LLVMNimDIBuilderCreateFile".}
-proc nimDIBuilderCreateFunction*(d: NimDIBuilderRef, scope: NimMetadataRef,
-  name: cstring, linkageName: cstring, file: NimMetadataRef, lineNo: cuint,
-  ty: NimMetadataRef, isLocalToUnit: bool, isDefinition: bool, scopeLine: cuint,
-  flags: cuint, isOptimized: bool, fn: llvm.ValueRef, tparam: NimMetadataRef,
-  decl: NimMetadataRef): NimMetadataRef {.importc: "LLVMNimDIBuilderCreateFunction".}
-proc nimDIBuilderCreateBasicType*(
-  d: NimDIBuilderRef, name: cstring, bits: uint64,
-  encoding: cuint): NimMetadataRef {.importc: "LLVMNimDIBuilderCreateBasicType".}
-proc nimDIBuilderCreatePointerType*(
-  d: NimDIBuilderRef, pointeeTy: NimMetadataRef, bits: uint64, align: uint32,
-  name: cstring): NimMetadataRef {.importc: "LLVMNimDIBuilderCreatePointerType".}
-proc nimDIBuilderCreateStructType*(
-  d: NimDIBuilderRef, scope: NimMetadataRef, name: cstring,
-  file: NimMetadataRef, lineNumber: cuint, sizeBits: uint64,
-  alignBits: uint32, flags: cuint, derivedFrom: NimMetadataRef,
-  elements: NimMetadataRef, runtimeLang: cuint, vtableHolder: NimMetadataRef,
-  uniqueId: cstring): NimMetadataRef {.importc: "LLVMNimDIBuilderCreateStructType".}
-proc nimDIBuilderCreateMemberType*(
-  d: NimDIBuilderRef, scope: NimMetadataRef, name: cstring,
-  file: NimMetadataRef, lineNo: cuint, sizeBits: uint64, alignBits: uint32,
+proc dIBuilderCreateSubroutineType*(
+  d: DIBuilderRef, file: MetadataRef, parameterTypes: openArray[MetadataRef]): MetadataRef =
+  dIBuilderCreateSubroutineType(d, nil, parameterTypes.oaAddr,
+  parameterTypes.oaLen, DIFlagZero)
+proc dIBuilderCreateFunction*(d: DIBuilderRef, scope: MetadataRef,
+  name: string, linkageName: string, file: MetadataRef, lineNo: cuint,
+  ty: MetadataRef, isLocalToUnit: bool, isDefinition: bool, scopeLine: cuint,
+  flags: cuint, isOptimized: bool): MetadataRef =
+  dIBuilderCreateFunction(d, scope, name.cstring, name.len, linkageName.cstring,
+  linkageName.len, file, lineNo, ty, isLocalToUnit.Bool, isDefinition.Bool,
+  scopeLine, flags.DIFlags, isOptimized.Bool)
+proc dIBuilderCreateBasicType*(
+  d: DIBuilderRef, name: string, bits: uint64,
+  encoding: cuint, flags: DIFlags = DIFlagZero): MetadataRef =
+  dIBuilderCreateBasicType(d, name.cstring, name.len, bits, encoding, flags)
+proc dIBuilderCreatePointerType*(
+  d: DIBuilderRef, pointeeTy: MetadataRef, bits: uint64, align: uint32,
+  name: string): MetadataRef =
+  dIBuilderCreatePointerType(d, pointeeTy, bits, align, 0, name.cstring, name.len)
+proc dIBuilderCreateStructType*(
+  d: DIBuilderRef, scope: MetadataRef, name: string,
+  file: MetadataRef, lineNumber: cuint, sizeBits: uint64,
+  alignBits: uint32, flags: cuint, derivedFrom: MetadataRef,
+  elements: openArray[MetadataRef], runtimeLang: cuint, vtableHolder: MetadataRef,
+  uniqueId: string): MetadataRef =
+  dIBuilderCreateStructType(d, scope, name.cstring, name.len, file, lineNumber,
+  sizeBits, alignBits, flags.DIFlags, derivedFrom, elements.oaAddr, elements.oaLen,
+  runtimeLang, vtableHolder, uniqueId.cstring, uniqueId.len)
+proc dIBuilderCreateMemberType*(
+  d: DIBuilderRef, scope: MetadataRef, name: string,
+  file: MetadataRef, lineNo: cuint, sizeBits: uint64, alignBits: uint32,
   offsetBits: uint64, flags: cuint,
-  ty: NimMetadataRef): NimMetadataRef {.importc: "LLVMNimDIBuilderCreateMemberType".}
-proc nimDIBuilderCreateStaticVariable*(
-  d: NimDIBuilderRef, context: NimMetadataRef, name: cstring,
-  linkageName: cstring, file: NimMetadataRef, lineNo: cuint, ty: NimMetadataRef,
-  isLocalToUnit: bool, v: ValueRef, decl: NimMetadataRef,
-  alignBits: uint32): NimMetadataRef {.importc: "LLVMNimDIBuilderCreateStaticVariable".}
-proc nimDIBuilderCreateVariable*(
-  d: NimDIBuilderRef, tag: cuint, scope: NimMetadataRef, name: cstring,
-  file: NimMetadataRef, lineNo: cuint, ty: NimMetadataRef, alwaysPreserve: bool,
-  flags: cuint, argNo: cuint, alignBits: uint32): NimMetadataRef {.importc: "LLVMNimDIBuilderCreateVariable".}
-proc nimDIBuilderCreateArrayType*(
-  d: NimDIBuilderRef, size: uint64, alignBits: uint32, ty: NimMetadataRef,
-  subscripts: NimMetadataRef): NimMetadataRef {.importc: "LLVMNimDIBuilderCreateArrayType".}
-proc nimDIBuilderCreateSubrange*(
-  d: NimDIBuilderRef, lo, count: int64): NimMetadataRef {.importc: "LLVMNimDIBuilderCreateSubrange".}
-proc nimDIBuilderGetOrCreateArray*(d: NimDIBuilderRef, p: ptr NimMetadataRef,
-  count: cuint): NimMetadataRef {.importc: "LLVMNimDIBuilderGetOrCreateArray".}
-proc nimDIBuilderInsertDeclareAtEnd*(
-  d: NimDIBuilderRef, v: ValueRef, varInfo: NimMetadataRef, addrOps: ptr int64,
-  addrOpsCount: cuint, dl: ValueRef,
-  insertAtEnd: BasicBlockRef): ValueRef {.importc: "LLVMNimDIBuilderInsertDeclareAtEnd".}
+  ty: MetadataRef): MetadataRef =
+  dIBuilderCreateMemberType(d, scope, name.cstring, name.len, file, lineNo,
+  sizeBits, alignBits, offsetBits, flags.DIFlags, ty)
+proc dIBuilderCreateGlobalVariableExpression*(
+  d: DIBuilderRef, context: MetadataRef, name: string,
+  linkageName: string, file: MetadataRef, lineNo: cuint, ty: MetadataRef,
+  isLocalToUnit: bool, exp: MetadataRef, decl: MetadataRef,
+  alignBits: uint32): MetadataRef =
+  dIBuilderCreateGlobalVariableExpression(d, context, name.cstring, name.len,
+  linkageName.cstring, linkageName.len, file, lineNo, ty, isLocalToUnit.Bool,
+  exp, decl, alignBits)
+
+proc dIBuilderCreateAutoVariable*(
+  d: DIBuilderRef, scope: MetadataRef, name: string,
+  file: MetadataRef, lineNo: cuint, ty: MetadataRef, alwaysPreserve: bool,
+  flags: cuint, alignBits: uint32): MetadataRef =
+  dIBuilderCreateAutoVariable(d, scope, name.cstring, name.len, file, lineNo,
+  ty, alwaysPreserve.Bool, flags.DIFlags, alignBits)
+proc dIBuilderCreateParameterVariable*(
+  d: DIBuilderRef, scope: MetadataRef, name: string, argNo: cuint,
+  file: MetadataRef, lineNo: cuint, ty: MetadataRef, alwaysPreserve: bool,
+  flags: cuint): MetadataRef =
+  dIBuilderCreateParameterVariable(d, scope, name.cstring, name.len, argNo,
+  file, lineNo, ty, alwaysPreserve.Bool, flags.DIFlags)
+proc dIBuilderCreateArrayType*(
+  d: DIBuilderRef, size: uint64, alignBits: uint32, ty: MetadataRef,
+  subscripts: openArray[MetadataRef]): MetadataRef =
+  dIBuilderCreateArrayType(d, size, alignBits, ty, subscripts.oaAddr, subscripts.oaLen)
+proc dIBuilderGetOrCreateArray*(d: DIBuilderRef, p: openArray[MetadataRef]): MetadataRef =
+  dIBuilderGetOrCreateArray(d, p.oaAddr, p.oaLen.csize)
 proc nimDICompositeTypeSetTypeArray*(
-  d: NimDIBuilderRef, compositeTy: NimMetadataRef,
-  tyArray: NimMetadataRef) {.importc: "LLVMNimDICompositeTypeSetTypeArray".}
-proc nimDIBuilderCreateDebugLocation*(
-  ctx: ContextRef, line: cuint, column: cuint, scope: NimMetadataRef,
-  inlinedAt: NimMetadataRef): ValueRef {.importc: "LLVMNimDIBuilderCreateDebugLocation".}
+  d: DIBuilderRef, compositeTy: MetadataRef,
+  tyArray: MetadataRef) {.importc: "LLVMNimDICompositeTypeSetTypeArray".}
+proc addModuleFlag*(
+  m: ModuleRef, behavior: ModuleFlagBehavior, key: string, val: MetadataRef) =
+  addModuleFlag(m, behavior, key.cstring, key.len, val)
+proc nimSetMetadataGlobal*(
+  val: ValueRef; kindID: cuint; node: ValueRef) {.importc: "LLVMNimSetMetadataGlobal".}
+
+proc nimLLDLinkElf*(
+  argv: cstringArray, argc: cint): cstring {.importc: "LLVMNimLLDLinkElf".}
+
+proc nimLLDLinkElf*(args: openArray[string]): string =
+  let argv = allocCStringArray(args)
+  defer: deallocCStringArray(argv)
+
+  let tmp = nimLLDLinkElf(argv, args.len.cint)
+  if not tmp.isNil:
+    result = strip($tmp)
+    disposeMessage(tmp)
+
+proc nimLLDLinkWasm*(
+  argv: cstringArray, argc: cint): cstring {.importc: "LLVMNimLLDLinkWasm".}
+
+proc nimLLDLinkWasm*(args: openArray[string]): string =
+  let argv = allocCStringArray(args)
+  defer: deallocCStringArray(argv)
+
+  let tmp = nimLLDLinkWasm(argv, args.len.cint)
+  if not tmp.isNil:
+    result = strip($tmp)
+    disposeMessage(tmp)
 
 # A few helpers to make things more smooth
 
@@ -169,7 +231,7 @@ const
   False*: Bool = 0
   True*: Bool = 1
 
-template checkErr(body: expr): expr =
+template checkErr(body: untyped) =
   var err: cstring
   let e {.inject.} = cast[cstringArray](addr(err))
   let res = body
@@ -197,7 +259,7 @@ iterator params*(fn: ValueRef): ValueRef =
     it = it.getNextParam()
 
 # openArray -> pointer + len
-template asRaw(arr: expr, body: expr): expr =
+template asRaw(arr: untyped, body: untyped): untyped =
   var s = @arr
   let n {.inject.} = s.len.cuint
   let p {.inject.} = if s.len > 0: addr(s[0]) else: nil
@@ -212,9 +274,9 @@ proc getParamTypes*(functionTy: TypeRef): seq[TypeRef] =
   if result.len > 0:
     functionTy.getParamTypes(addr(result[0]))
 
-proc structType*(elementTypes: openarray[TypeRef],
-                 packed = False): TypeRef =
-  asRaw(elementTypes, structType(p, n, packed))
+proc structTypeInContext*(c: ContextRef, elementTypes: openarray[TypeRef],
+                          packed = False): TypeRef =
+  asRaw(elementTypes, structTypeInContext(c, p, n, packed))
 
 proc structSetBody*(structTy: TypeRef; elementTypes: openarray[TypeRef];
                     packed = False) =
@@ -228,11 +290,11 @@ proc getStructElementTypes*(structTy: TypeRef): seq[TypeRef] =
 proc pointerType*(elementType: TypeRef): TypeRef =
   pointerType(elementType, 0)
 
-proc constString*(s: string, dontNullTerminate = False): ValueRef =
-  constString(s, s.len.cuint, dontNullTerminate)
+proc constStringInContext*(c: ContextRef, s: string, dontNullTerminate = False): ValueRef =
+  constStringInContext(c, s, s.len.cuint, dontNullTerminate)
 
-proc constStruct*(constantVals: openarray[ValueRef]; packed = False): ValueRef =
-  asRaw(constantVals, constStruct(p, n, packed))
+proc constStructInContext*(c: ContextRef, constantVals: openarray[ValueRef]; packed = False): ValueRef =
+  asRaw(constantVals, constStructInContext(c, p, n, packed))
 
 proc constArray*(t: TypeRef, constantVals: openarray[ValueRef]): ValueRef =
   asRaw(constantVals, constArray(t, p, n))
@@ -266,17 +328,35 @@ proc buildCall*(a2: BuilderRef; fn: ValueRef; args: openarray[ValueRef];
                 name: cstring = ""): ValueRef =
   asRaw(args, buildCall(a2, fn, p, n, name))
 
-proc nimDIBuilderGetOrCreateArray*(
-  d: NimDIBuilderRef, elems: openarray[NimMetadataRef]): NimMetadataRef =
-  var tmp = @elems
-  var p = if tmp.len > 0: addr(tmp[0]) else: nil
-  d.nimDIBuilderGetOrCreateArray(p, tmp.len.cuint)
+proc buildInvoke*(a1: BuilderRef; fn: ValueRef;
+    args: openArray[ValueRef]; then: BasicBlockRef; catch: BasicBlockRef;
+    name: cstring = ""): ValueRef =
+  asRaw(args, buildInvoke(a1, fn, p, n, then, catch, name))
 
-template getEnumAttrKind(x: expr): expr = getEnumAttributeKindForName(x, x.len)
+proc diBuilderCreateFile*(builder: DIBuilderRef, filename: string, directory: string): MetadataRef =
+  diBuilderCreateFile(builder, filename.cstring, filename.len.csize,
+    directory.cstring, directory.len.csize)
+
+template getEnumAttrKind(x: untyped): untyped = getEnumAttributeKindForName(x, x.len)
 
 let
   attrNoReturn* = getEnumAttrKind("noreturn")
   attrNoInline* = getEnumAttrKind("noinline")
+  attrCold* = getEnumAttrKind("cold")
 
 proc addFuncAttribute*(f: ValueRef, v: AttributeRef) =
   addAttributeAtIndex(f, cast[AttributeIndex](AttributeFunctionIndex), v)
+
+proc getMDKindIDInContext*(c: ContextRef, name: string): cuint =
+  getMDKindIDInContext(c, name.cstring, name.len.cuint)
+
+proc createStringAttribute*(c: ContextRef, k, v: string): AttributeRef =
+  createStringAttribute(c, k.cstring, k.len.cuint, v.cstring, v.len.cuint)
+
+
+proc appendBasicBlockInContext*(
+    b: BuilderRef, c: ContextRef, name: cstring): BasicBlockRef =
+  let
+    pre = b.getInsertBlock()
+    f = pre.getBasicBlockParent()
+  appendBasicBlockInContext(c, f, name)

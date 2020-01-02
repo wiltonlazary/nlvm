@@ -1,24 +1,52 @@
-#!/bin/bash
+#!/bin/sh
+
+# Build llvm, as used in the Makefile
+# A bit broken because it doesn't track cmake options and deps correctly
+
+[ $# -gt 4 ] || {
+ echo "$0 major minor patch output_dir cmake_options*"
+ exit 1
+}
+
+set -e
 
 mkdir -p ext
 cd ext
 
-VER="4.0"
-VER2="$VER.0"
+VER="$1.$2"
+VER2="$VER.$3"
+TGT="$4"
 
-[[ -f libLLVM-$VER.so ]] && exit 0
+LLVM_ROOT=llvm-$VER2.src
+LLD_ROOT=lld-$VER2.src
 
-[[ -f llvm-$VER2.src.tar.xz ]] || wget http://releases.llvm.org/$VER2/llvm-$VER2.src.tar.xz || exit 1
+[ -f $LLVM_ROOT.tar.xz ] || {
+  wget http://releases.llvm.org/$VER2/$LLVM_ROOT.tar.xz
+}
 
-tar xf llvm-$VER2.src.tar.xz || exit 1
-cd llvm-$VER2.src
-mkdir -p rel
-cd rel
-cmake -DCMAKE_BUILD_TYPE=Release -DLLVM_BUILD_LLVM_DYLIB=1 -DLLVM_TARGETS_TO_BUILD=X86 -DLLVM_ENABLE_ASSERTIONS=1 ..
+[ -f $LLVM_ROOT/CMakeLists.txt ] || {
+  tar xf $LLVM_ROOT.tar.xz
+}
 
-make -j$(nproc)
+[ -f $LLD_ROOT.tar.xz ] || {
+  wget http://releases.llvm.org/$VER2/$LLD_ROOT.tar.xz
+}
 
-cd ..
-cd ..
+[ -f $LLD_ROOT/CMakeLists.txt ] || {
+  tar xf $LLD_ROOT.tar.xz
+}
 
-ln -s llvm-$VER2.src/rel/lib/*.so .
+[ -d $LLVM_ROOT/projects/lld ] || {
+  rm -rf $LLVM_ROOT/projects/lld
+  ln -sfr $LLD_ROOT $LLVM_ROOT/projects/lld
+}
+
+cd $LLVM_ROOT
+
+mkdir -p $TGT
+cd $TGT
+
+shift 4
+cmake -GNinja -DLLVM_USE_LINKER=gold "$@" ..
+
+ninja
